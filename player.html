@@ -83,6 +83,19 @@ video{width:100%; height:100%; display:block; background:#000}
 .set .msg{margin-top:12px; font-size:.9rem; overflow-wrap:anywhere}
 .set .msg.bad{color:#c0392b}
 .set .hint{margin-top:10px; font-size:.85rem; color:var(--muted)}
+.sub .w{pointer-events:auto; cursor:pointer; border-radius:3px}
+.sub .w:active{background:rgba(255,255,255,.28)}
+.card{position:fixed; left:0; right:0; bottom:0; margin:0 auto; width:min(100%,560px); max-height:65vh; overflow:auto; background:var(--surface); color:var(--text); border:1px solid var(--line); border-radius:16px 16px 0 0; padding:16px 16px calc(16px + env(safe-area-inset-bottom,0px)); z-index:5}
+.card[hidden]{display:none}
+.cw{font-size:1.5rem; font-weight:700}
+.ct{font-size:1.2rem; color:var(--accent); margin-top:2px}
+.ce,.cs,.cx{margin-top:10px}
+.cs{color:var(--muted); font-size:.9rem}
+.cx{white-space:pre-line}
+.cb{display:flex; gap:8px; flex-wrap:wrap; margin-top:14px}
+.btn:disabled{opacity:.6}
+.wi{display:flex; justify-content:space-between; align-items:center; gap:8px; padding:8px 0; border-top:1px solid var(--line)}
+.wi button{font:inherit; font-size:.85rem; padding:6px 10px; border-radius:8px; border:1px solid var(--line); background:var(--bg); color:var(--text); cursor:pointer}
 input[type=file]{display:none}
 </style>
 </head>
@@ -99,6 +112,17 @@ input[type=file]{display:none}
     <video id="v" controls controlslist="nofullscreen" playsinline></video>
     <div class="sub" id="sub"><span class="txt" id="subtxt"></span></div>
     <button class="fs" id="fs" aria-label="На весь экран"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg></button>
+    <div class="card" id="card" hidden>
+      <div class="cw" id="cw"></div>
+      <div class="ct" id="ct"></div>
+      <div class="ce" id="ce"></div>
+      <div class="cs" id="cs"></div>
+      <div class="cx" id="cx"></div>
+      <div class="cb">
+        <button class="btn" id="csave">Сохранить слово</button>
+        <button class="btn ghost" id="cclose">Продолжить</button>
+      </div>
+    </div>
   </div>
 
   <div class="suberr" id="suberr"></div>
@@ -121,6 +145,10 @@ input[type=file]{display:none}
   </div>
 
   <div class="err" id="err">Не получилось открыть этот файл. Попробуй видео в формате MP4.</div>
+  <details class="set" id="wl">
+    <summary id="wlsum">Мои слова (0)</summary>
+    <div id="wlist"></div>
+  </details>
   <details class="set" id="set">
     <summary>Настройки перевода (Gemini)</summary>
     <label for="key">Ключ Gemini (хранится только в этом браузере)</label>
@@ -211,7 +239,7 @@ input[type=file]{display:none}
   function draw(){
     if(!cues.length) return;
     var i=cur(v.currentTime);
-    if(i!==last){ last=i; subtxt.textContent = i>=0 ? cues[i].t : ''; }
+    if(i!==last){ last=i; render(i>=0 ? cues[i].t : ''); }
   }
 
   function loop(){ draw(); raf=requestAnimationFrame(loop) }
@@ -285,13 +313,13 @@ input[type=file]{display:none}
     say(a&&b ? 'Сохранено в этом браузере.' : 'Браузер не дал сохранить. Ключ будет работать, пока страница открыта.', !(a&&b));
   });
 
-  function askGemini(prompt){
+  function askGemini(prompt,asJson){
     var key=keyEl.value.trim(), model=modelEl.value.trim()||DEFAULT_MODEL;
     if(!key) return Promise.reject(new Error('Сначала вставь ключ.'));
     return fetch('https://generativelanguage.googleapis.com/v1beta/models/'+encodeURIComponent(model)+':generateContent',{
       method:'POST',
       headers:{'Content-Type':'application/json','x-goog-api-key':key},
-      body:JSON.stringify({contents:[{parts:[{text:prompt}]}]})
+      body:JSON.stringify(asJson ? {contents:[{parts:[{text:prompt}]}],generationConfig:{responseMimeType:'application/json'}} : {contents:[{parts:[{text:prompt}]}]})
     }).then(function(r){
       return r.json().catch(function(){return {}}).then(function(j){
         if(!r.ok) throw new Error((j.error&&j.error.message)||('Ошибка '+r.status));
@@ -312,6 +340,96 @@ input[type=file]{display:none}
         ? 'Нет связи с Gemini. Если страница открыта внутри Claude, внешние запросы там заблокированы, это нормально. Проверим, когда выложим страницу на свой бесплатный хостинг.'
         : 'Сбой: '+e.message, true);
     });
+  });
+  /* ---- Клик по слову ---- */
+  var card=$('card'), curW=null, reqId=0, cache={}, words=[];
+  try{ cache=JSON.parse(lsGet('wcache')||'{}') }catch(e){ cache={} }
+  try{ words=JSON.parse(lsGet('words')||'[]') }catch(e){ words=[] }
+
+  function render(text){
+    subtxt.textContent='';
+    if(!text) return;
+    var re=/[A-Za-z][A-Za-z'’-]*/g, pos=0, m;
+    while((m=re.exec(text))){
+      if(m.index>pos) subtxt.appendChild(document.createTextNode(text.slice(pos,m.index)));
+      var s=document.createElement('span'); s.className='w'; s.textContent=m[0];
+      subtxt.appendChild(s);
+      pos=m.index+m[0].length;
+    }
+    if(pos<text.length) subtxt.appendChild(document.createTextNode(text.slice(pos)));
+  }
+
+  function saveCache(){
+    var ks=Object.keys(cache);
+    if(ks.length>600){ for(var i=0;i<300;i++) delete cache[ks[i]]; }
+    lsSet('wcache',JSON.stringify(cache));
+  }
+
+  function drawWords(){
+    $('wlsum').textContent='Мои слова ('+words.length+')';
+    var box=$('wlist'); box.textContent='';
+    words.forEach(function(w,i){
+      var d=document.createElement('div'); d.className='wi';
+      var s=document.createElement('span'); s.textContent=w.word+' — '+w.ru;
+      var b=document.createElement('button'); b.textContent='Удалить';
+      b.addEventListener('click',function(){ words.splice(i,1); lsSet('words',JSON.stringify(words)); drawWords() });
+      d.appendChild(s); d.appendChild(b); box.appendChild(d);
+    });
+  }
+  drawWords();
+
+  function showCard(r){
+    $('cw').textContent=r.word||'';
+    $('ct').textContent=r.ru||'';
+    $('ce').textContent=r.meaning||'';
+    $('cs').textContent=r.sent ? 'Из фильма: '+r.sent : '';
+    $('cx').textContent=r.ex_en ? r.ex_en+(r.ex_ru ? '\n'+r.ex_ru : '') : '';
+    var saved=words.some(function(w){ return w.word===r.word });
+    var b=$('csave'); b.style.display=''; b.disabled=saved;
+    b.textContent=saved ? 'Сохранено' : 'Сохранить слово';
+  }
+
+  function lookup(word,sent){
+    var id=++reqId, key=word.toLowerCase()+'|'+sent;
+    v.pause();
+    curW=null;
+    $('cw').textContent=word; $('ct').textContent='Перевожу…';
+    $('ce').textContent=''; $('cs').textContent=''; $('cx').textContent='';
+    $('csave').style.display='none';
+    card.hidden=false;
+    if(cache[key]){ curW=cache[key]; showCard(curW); return; }
+    var prompt='Ты помощник для изучающего английский, родной язык русский. Фраза из фильма: '+JSON.stringify(sent)+'. Слово: '+JSON.stringify(word)+'. Ответь только JSON с полями: "word" (слово в начальной форме), "ru" (перевод именно в этой фразе, 1-3 слова), "meaning" (одно короткое предложение по-русски: в каком значении слово здесь), "ex_en" (простой пример на английском в этом же значении), "ex_ru" (перевод примера).';
+    askGemini(prompt,true).then(function(t){
+      var r=JSON.parse(t.replace(/^```(?:json)?|```$/g,'').trim());
+      r.sent=sent;
+      cache[key]=r; saveCache();
+      if(id!==reqId) return;
+      curW=r; showCard(r);
+    }).catch(function(e){
+      if(id!==reqId) return;
+      $('ct').textContent = e instanceof TypeError ? 'Нет связи. Проверь интернет.'
+        : e instanceof SyntaxError ? 'Gemini ответил не по формату. Нажми на слово ещё раз.'
+        : (e.message || 'Не получилось перевести.');
+    });
+  }
+
+  sub.addEventListener('click',function(e){
+    var w=e.target.closest && e.target.closest('.w');
+    if(!w) return;
+    var sent = (last>=0 && cues[last]) ? cues[last].t.replace(/\s+/g,' ') : w.textContent;
+    lookup(w.textContent,sent);
+  });
+
+  $('csave').addEventListener('click',function(){
+    if(!curW) return;
+    words.unshift({word:curW.word,ru:curW.ru,meaning:curW.meaning,ex_en:curW.ex_en,ex_ru:curW.ex_ru,sent:curW.sent});
+    lsSet('words',JSON.stringify(words));
+    drawWords(); showCard(curW);
+  });
+
+  $('cclose').addEventListener('click',function(){
+    reqId++; card.hidden=true;
+    var p=v.play(); if(p&&p.catch) p.catch(function(){});
   });
 })();
 </script>
